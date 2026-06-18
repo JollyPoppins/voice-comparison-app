@@ -34,7 +34,7 @@ type Provider = 'HappyRobot' | 'Phenom';
 type DimKey =
   | 'latency' | 'prosody' | 'interruption' | 'backchanneling' | 'asrAccuracy'
   | 'endOfTurn' | 'recovery' | 'conversationFlow' | 'voiceAffect'
-  | 'transcriptionQuality';
+  | 'agentInterrupting';
 type Scores   = Record<DimKey, number>;
 type DimNotes = Record<DimKey, string>;
 
@@ -46,10 +46,10 @@ interface DeleteState { id: string; pw: string; error: boolean; }
 
 // ── Dimension metadata ────────────────────────────────────────────────────────
 const DIM_KEYS: DimKey[] = [
-  'latency','prosody','interruption','backchanneling','asrAccuracy',
-  'endOfTurn','recovery','conversationFlow','voiceAffect','transcriptionQuality',
+  'latency','prosody','interruption','agentInterrupting','backchanneling','asrAccuracy',
+  'endOfTurn','recovery','conversationFlow','voiceAffect',
 ];
-const OPTIONAL_DIMS: DimKey[] = ['transcriptionQuality'];
+const OPTIONAL_DIMS: DimKey[] = ['asrAccuracy'];
 
 interface DimMeta { label: string; hint: string; what: string; anchors: string[]; techRoot: string; realtimeTip?: string; }
 
@@ -123,53 +123,53 @@ const DIMS: Record<DimKey, DimMeta> = {
     anchors: ['Adapts naturally — empathetic when needed, brisk when factual','Generally appropriate, rare mismatch','Mostly flat regardless of context','Frequent mismatches — upbeat when caller is frustrated','Completely flat or consistently wrong tone'],
     techRoot: 'TTS expressiveness controls, sentiment-aware prompts, emotion-conditioned TTS.',
   },
-  transcriptionQuality: {
-    label: 'Transcription Quality',
-    hint: 'Compare what was said vs what the transcript shows — spot-check 3–5 key moments',
-    what: 'How accurately the STT layer converts speech to text. Errors here propagate into LLM reasoning. Only score if you have access to the call transcript.',
-    anchors: ['Perfect or near-perfect — no meaningful errors observed','Minor errors (proper nouns, numbers) that did not affect responses','Several errors — some changed what the agent understood','Frequent errors significantly affecting conversation quality','Transcription unreliable — responses often based on wrong text'],
-    techRoot: 'STT model accuracy, acoustic adaptation, noise robustness, vocabulary coverage for domain-specific terms.',
-    realtimeTip: 'Only score if you have access to the transcript. Focus on high-stakes moments: names, job titles, numbers, dates.',
+  agentInterrupting: {
+    label: 'Agent Interrupting',
+    hint: 'Does the agent cut in while the candidate is still speaking? Note every premature interruption.',
+    what: 'Whether the agent breaks into the candidate\'s speech before they have finished their turn. Measured from the listener\'s perspective — any overlap where the agent starts talking over the candidate counts.',
+    anchors: ['Never interrupts — always waits for a complete turn','Rare, minor overlap (1 instance) that did not disrupt the flow','Occasional interruptions (2–3) that cause noticeable friction','Frequent interruptions — candidate has to restart several times','Constant cut-ins — conversation is repeatedly broken'],
+    techRoot: 'End-of-turn detection threshold, VAD aggressiveness, silence timeout set too short, or missing sentence-boundary model.',
+    realtimeTip: 'Give a long, flowing answer with a mid-sentence pause — note whether the agent jumps in before you finish.',
   },
 };
 
 // ── Seed data ─────────────────────────────────────────────────────────────────
 const EMPTY_DIM_NOTES: DimNotes = {
-  latency:'',prosody:'',interruption:'',backchanneling:'',asrAccuracy:'',
-  endOfTurn:'',recovery:'',conversationFlow:'',voiceAffect:'',transcriptionQuality:'',
+  latency:'',prosody:'',interruption:'',agentInterrupting:'',backchanneling:'',asrAccuracy:'',
+  endOfTurn:'',recovery:'',conversationFlow:'',voiceAffect:'',
 };
 
 const SEED: CallEntry[] = [
   { id:'s1', provider:'HappyRobot', tenant:'DHL', jobId:'JD-2481', fullName:'Marcus Rivera', reviewer:'Priya M.',
-    scores:{latency:5,prosody:4,interruption:5,backchanneling:4,asrAccuracy:5,endOfTurn:4,recovery:4,conversationFlow:5,voiceAffect:4,transcriptionQuality:0},
-    dimNotes:{...EMPTY_DIM_NOTES,latency:"Consistent sub-1 s — felt instant",backchanneling:"Said 'mm-hmm' naturally ~3 times"},
+    scores:{latency:5,prosody:4,interruption:5,agentInterrupting:5,backchanneling:4,asrAccuracy:5,endOfTurn:4,recovery:4,conversationFlow:5,voiceAffect:4},
+    dimNotes:{...EMPTY_DIM_NOTES,latency:"Consistent sub-1 s — felt instant",backchanneling:"Said 'mm-hmm' naturally ~3 times",agentInterrupting:"Never cut in — clean turn-taking throughout"},
     notes:"Very natural pacing. Said 'mm-hmm' at right moments. Stopped immediately when I interrupted." },
   { id:'s2', provider:'Phenom', tenant:'DHL', jobId:'JD-2481', fullName:'Marcus Rivera', reviewer:'Priya M.',
-    scores:{latency:3,prosody:3,interruption:2,backchanneling:1,asrAccuracy:4,endOfTurn:3,recovery:3,conversationFlow:3,voiceAffect:2,transcriptionQuality:0},
-    dimNotes:{...EMPTY_DIM_NOTES,latency:'~1.5 s gap before every response',backchanneling:'Zero backchanneling throughout'},
-    notes:"~1.5 s latency. No backchanneling — felt like talking to a wall. Finished its sentence when I tried to interrupt." },
+    scores:{latency:3,prosody:3,interruption:2,agentInterrupting:2,backchanneling:1,asrAccuracy:4,endOfTurn:3,recovery:3,conversationFlow:3,voiceAffect:2},
+    dimNotes:{...EMPTY_DIM_NOTES,latency:'~1.5 s gap before every response',backchanneling:'Zero backchanneling throughout',agentInterrupting:'Cut in twice mid-sentence'},
+    notes:"~1.5 s latency. No backchanneling — felt like talking to a wall. Agent cut in before I finished twice." },
   { id:'s3', provider:'HappyRobot', tenant:'DHL', jobId:'JD-1893', fullName:'Priya Nair', reviewer:'Daniel K.',
-    scores:{latency:4,prosody:5,interruption:4,backchanneling:5,asrAccuracy:4,endOfTurn:5,recovery:3,conversationFlow:4,voiceAffect:5,transcriptionQuality:5},
-    dimNotes:{...EMPTY_DIM_NOTES,prosody:'Pitch dropped noticeably when I described a stressful situation',transcriptionQuality:"Spot-checked 5 moments — all accurate including 'Dusseldorf' and 'forklift operator'"},
-    notes:'Very expressive voice. Strong backchanneling throughout.' },
+    scores:{latency:4,prosody:5,interruption:4,agentInterrupting:5,backchanneling:5,asrAccuracy:4,endOfTurn:5,recovery:3,conversationFlow:4,voiceAffect:5},
+    dimNotes:{...EMPTY_DIM_NOTES,prosody:'Pitch dropped noticeably when I described a stressful situation',agentInterrupting:'Zero interruptions — excellent patience'},
+    notes:'Very expressive voice. Strong backchanneling throughout. Never interrupted the candidate.' },
   { id:'s4', provider:'Phenom', tenant:'DHL', jobId:'JD-1893', fullName:'Priya Nair', reviewer:'Daniel K.',
-    scores:{latency:3,prosody:2,interruption:3,backchanneling:1,asrAccuracy:3,endOfTurn:2,recovery:2,conversationFlow:2,voiceAffect:2,transcriptionQuality:2},
-    dimNotes:{...EMPTY_DIM_NOTES,asrAccuracy:"Misheard 'Azure' as 'Asia'",transcriptionQuality:"'Forklift' → 'for lift' — caused wrong follow-up"},
-    notes:"Cut me off twice. Flat tone. Misheard 'Azure' as 'Asia'." },
+    scores:{latency:3,prosody:2,interruption:3,agentInterrupting:2,backchanneling:1,asrAccuracy:3,endOfTurn:2,recovery:2,conversationFlow:2,voiceAffect:2},
+    dimNotes:{...EMPTY_DIM_NOTES,asrAccuracy:"Misheard 'Azure' as 'Asia'",agentInterrupting:"Interrupted 3 times — twice mid-answer"},
+    notes:"Cut the candidate off multiple times. Flat tone. Misheard 'Azure' as 'Asia'." },
   { id:'s5', provider:'HappyRobot', tenant:'DHL', jobId:'JD-3062', fullName:'Tom Bauer', reviewer:'Sana R.',
-    scores:{latency:5,prosody:4,interruption:4,backchanneling:3,asrAccuracy:5,endOfTurn:4,recovery:5,conversationFlow:4,voiceAffect:3,transcriptionQuality:0},
+    scores:{latency:5,prosody:4,interruption:4,agentInterrupting:5,backchanneling:3,asrAccuracy:5,endOfTurn:4,recovery:5,conversationFlow:4,voiceAffect:3},
     dimNotes:{...EMPTY_DIM_NOTES,recovery:"Asked specifically about the gap I left, not a generic 'please repeat'"},
-    notes:'Recovery was impressive — targeted follow-up showing it retained context from earlier.' },
+    notes:'Recovery was impressive. Never talked over the candidate.' },
   { id:'s6', provider:'Phenom', tenant:'DHL', jobId:'JD-3062', fullName:'Tom Bauer', reviewer:'Sana R.',
-    scores:{latency:2,prosody:2,interruption:2,backchanneling:1,asrAccuracy:3,endOfTurn:3,recovery:2,conversationFlow:2,voiceAffect:2,transcriptionQuality:0},
-    dimNotes:{...EMPTY_DIM_NOTES,latency:'2+ s before every reply',recovery:'Asked me to repeat the whole answer'},
-    notes:'2+ second latency. Generic error recovery. Backchanneling completely absent.' },
+    scores:{latency:2,prosody:2,interruption:2,agentInterrupting:1,backchanneling:1,asrAccuracy:3,endOfTurn:3,recovery:2,conversationFlow:2,voiceAffect:2},
+    dimNotes:{...EMPTY_DIM_NOTES,latency:'2+ s before every reply',recovery:'Asked me to repeat the whole answer',agentInterrupting:'Constantly cut in — 5+ times'},
+    notes:'2+ second latency. Generic error recovery. Backchanneling absent. Constantly interrupted candidate.' },
 ];
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const ZERO: Scores = {
-  latency:0,prosody:0,interruption:0,backchanneling:0,asrAccuracy:0,
-  endOfTurn:0,recovery:0,conversationFlow:0,voiceAffect:0,transcriptionQuality:0,
+  latency:0,prosody:0,interruption:0,agentInterrupting:0,backchanneling:0,asrAccuracy:0,
+  endOfTurn:0,recovery:0,conversationFlow:0,voiceAffect:0,
 };
 const REQUIRED_DIMS = DIM_KEYS.filter(k => !OPTIONAL_DIMS.includes(k));
 
@@ -254,8 +254,8 @@ function DimRow({ dimKey, scores, setScore, dimNote, setDimNote, isOptional }: {
           <div style={{ display:'flex', flexDirection:'column', gap:12, paddingTop:12 }}>
             {isOptional && (
               <div style={{ background:lt.fill.tertiary, border:`1px solid ${lt.stroke.secondary}`, borderRadius:6, padding:'8px 12px' }}>
-                <span style={{ fontSize:12, color:lt.text.secondary, lineHeight:'18px' }}>
-                  <strong>Optional.</strong> Only score this if you have access to the call transcript. Skip it if evaluating purely from listening.
+                  <span style={{ fontSize:12, color:lt.text.secondary, lineHeight:'18px' }}>
+                  <strong>Optional.</strong> Only score this if you can reliably verify transcription accuracy (e.g. access to a transcript or replay tool). Skip it if evaluating purely from listening.
                 </span>
               </div>
             )}
@@ -318,7 +318,7 @@ function LogTab({ setCalls }: { calls: CallEntry[]; setCalls: (v: CallEntry[] | 
 
   const scoredRequired  = REQUIRED_DIMS.filter(k => scores[k] > 0).length;
   const allScored       = REQUIRED_DIMS.every(k => scores[k] > 0);
-  const optionalScored  = scores['transcriptionQuality'] > 0;
+  const optionalScored  = scores['asrAccuracy'] > 0;
   const effectiveTenant = tenantLocked ? 'DHL' : tenant;
   const canSubmit       = !!(effectiveTenant.trim() && jobId.trim() && fullName.trim() && reviewer.trim() && allScored);
 
@@ -340,7 +340,7 @@ function LogTab({ setCalls }: { calls: CallEntry[]; setCalls: (v: CallEntry[] | 
       )}
       <div style={{ background:lt.fill.tertiary, border:`1px solid ${lt.stroke.secondary}`, borderRadius:6, padding:'10px 14px' }}>
         <div style={{ fontSize:12, fontWeight:700, color:lt.text.secondary, marginBottom:3 }}>Use while listening</div>
-        <div style={{ fontSize:12, color:lt.text.secondary, lineHeight:'18px' }}>Keep this open alongside the call recording. Score each dimension as you hear it. Transcription Quality is optional — only score it if you have access to the transcript.</div>
+        <div style={{ fontSize:12, color:lt.text.secondary, lineHeight:'18px' }}>Keep this open alongside the call recording. Score each dimension as you hear it. ASR Accuracy is optional — only score it if you have a reliable way to confirm transcription errors.</div>
       </div>
 
       <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:16 }}>
@@ -385,7 +385,7 @@ function LogTab({ setCalls }: { calls: CallEntry[]; setCalls: (v: CallEntry[] | 
             {scoredRequired} / {REQUIRED_DIMS.length} required{optionalScored?' + optional':''}
           </div>
         </div>
-        <div style={{ fontSize:12, color:lt.text.tertiary, marginBottom:12 }}>Click any label to expand anchors, a real-time tip, and a note field. Last dimension is optional.</div>
+        <div style={{ fontSize:12, color:lt.text.tertiary, marginBottom:12 }}>Click any label to expand anchors, a real-time tip, and a note field. ASR Accuracy is optional.</div>
         <div style={{ border:`1px solid ${lt.stroke.secondary}`, borderRadius:8, overflow:'hidden' }}>
           {DIM_KEYS.map(k => <DimRow key={k} dimKey={k} scores={scores} setScore={setScore} dimNote={dimNotes[k]} setDimNote={setDimNote} isOptional={OPTIONAL_DIMS.includes(k)} />)}
         </div>
