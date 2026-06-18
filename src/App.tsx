@@ -29,6 +29,53 @@ function useLocalState<T>(key: string, defaultValue: T): [T, (v: T | ((prev: T) 
   return [value, setState];
 }
 
+// ── Schema migration — keeps stored records valid across dimension changes ─────
+// Any time dimensions are added/removed/renamed, old records in localStorage are
+// automatically healed: missing scores default to 0, missing notes default to ''.
+// Records are never deleted — only normalised to the current schema.
+function migrateEntry(raw: unknown): CallEntry {
+  const r = raw as Record<string, unknown>;
+  const storedScores = ((r.scores ?? {}) as Record<string, unknown>);
+  const storedNotes  = ((r.dimNotes ?? {}) as Record<string, unknown>);
+  const scores: Scores    = { latency:0, prosody:0, interruption:0, agentInterrupting:0, backchanneling:0, asrAccuracy:0, endOfTurn:0, recovery:0, conversationFlow:0, voiceAffect:0 };
+  const dimNotes: DimNotes = { latency:'', prosody:'', interruption:'', agentInterrupting:'', backchanneling:'', asrAccuracy:'', endOfTurn:'', recovery:'', conversationFlow:'', voiceAffect:'' };
+  for (const k of DIM_KEYS) {
+    if (typeof storedScores[k] === 'number') scores[k]   = storedScores[k] as number;
+    if (typeof storedNotes[k]  === 'string') dimNotes[k] = storedNotes[k]  as string;
+  }
+  return {
+    id:       String(r.id ?? Math.random().toString(36).slice(2,9)),
+    provider: r.provider === 'Phenom' ? 'Phenom' : 'HappyRobot',
+    tenant:   String(r.tenant   ?? ''),
+    jobId:    String(r.jobId    ?? ''),
+    fullName: String(r.fullName ?? ''),
+    reviewer: String(r.reviewer ?? ''),
+    scores, dimNotes,
+    notes: String(r.notes ?? ''),
+  };
+}
+
+// ── useCallsState — loads + migrates stored calls, saves on every change ───────
+function useCallsState(): [CallEntry[], (v: CallEntry[] | ((p: CallEntry[]) => CallEntry[])) => void] {
+  const KEY = 'vca-calls';
+  const [value, setValue] = useState<CallEntry[]>(() => {
+    try {
+      const s = localStorage.getItem(KEY);
+      if (!s) return SEED;
+      const raw = JSON.parse(s) as unknown[];
+      return Array.isArray(raw) ? raw.map(migrateEntry) : SEED;
+    } catch { return SEED; }
+  });
+  function setState(newValue: CallEntry[] | ((prev: CallEntry[]) => CallEntry[])) {
+    setValue(prev => {
+      const next = typeof newValue === 'function' ? (newValue as (p: CallEntry[]) => CallEntry[])(prev) : newValue;
+      try { localStorage.setItem(KEY, JSON.stringify(next)); } catch { /* ignore */ }
+      return next;
+    });
+  }
+  return [value, setState];
+}
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 type Provider = 'HappyRobot' | 'Phenom';
 type DimKey =
@@ -412,6 +459,8 @@ function ResultsTab({ calls, setCalls }: { calls: CallEntry[]; setCalls: (v: Cal
   const [expandedCalls, setExpandedCalls] = useLocalState<Record<string,boolean>>('expanded-calls', {});
   const [deleteState,   setDeleteState]   = useLocalState<DeleteState|null>('delete-state', null);
   const [csvPanel,      setCsvPanel]      = useLocalState('csv-panel', '');
+  const [restorePanel,  setRestorePanel]  = useState('');
+  const [restoreMsg,    setRestoreMsg]    = useState<{ok:boolean;text:string}|null>(null);
 
   function toggleExpand(id: string) { setExpandedCalls(prev => ({ ...prev, [id]: !prev[id] })); }
   function requestDelete(id: string) {
@@ -425,7 +474,7 @@ function ResultsTab({ calls, setCalls }: { calls: CallEntry[]; setCalls: (v: Cal
   }
   function handleExport() {
     const csv = buildCSV(calls);
-    setCsvPanel(csv);
+    setCsvPanel(csv); setRestorePanel('');
     if (navigator.clipboard?.writeText) { navigator.clipboard.writeText(csv).catch(() => {}); }
     try {
       const a = document.createElement('a');
@@ -433,6 +482,37 @@ function ResultsTab({ calls, setCalls }: { calls: CallEntry[]; setCalls: (v: Cal
       a.setAttribute('download', 'voice-provider-evaluations.csv');
       document.body.appendChild(a); a.click(); document.body.removeChild(a);
     } catch { /* ignore */ }
+  }
+
+  function handleBackup() {
+    const payload = JSON.stringify({ version: 1, exportedAt: new Date().toISOString(), calls }, null, 2);
+    setCsvPanel(''); setRestorePanel(''); setRestoreMsg(null);
+    try {
+      const a = document.createElement('a');
+      a.href = 'data:application/json;charset=utf-8,' + encodeURIComponent(payload);
+      a.setAttribute('download', `vca-backup-${new Date().toISOString().slice(0,10)}.json`);
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    } catch { /* ignore */ }
+    if (navigator.clipboard?.writeText) { navigator.clipboard.writeText(payload).catch(() => {}); }
+  }
+
+  function handleRestore() {
+    if (!restorePanel.trim()) return;
+    try {
+      const parsed = JSON.parse(restorePanel);
+      const incoming: unknown[] = Array.isArray(parsed) ? parsed : (parsed?.calls ?? []);
+      if (!Array.isArray(incoming) || incoming.length === 0) throw new Error('No records found');
+      const migrated = incoming.map(migrateEntry);
+      setCalls(prev => {
+        const existingIds = new Set(prev.map(c => c.id));
+        const merged = [...prev, ...migrated.filter(c => !existingIds.has(c.id))];
+        return merged;
+      });
+      setRestoreMsg({ ok: true, text: `Restored ${migrated.length} record(s). Duplicates skipped.` });
+      setRestorePanel('');
+    } catch {
+      setRestoreMsg({ ok: false, text: 'Invalid backup file — paste the full JSON exported from this app.' });
+    }
   }
 
   const hr = calls.filter(c => c.provider === 'HappyRobot');
@@ -522,13 +602,36 @@ function ResultsTab({ calls, setCalls }: { calls: CallEntry[]; setCalls: (v: Cal
       <div style={{ borderTop:`1px solid ${lt.stroke.secondary}` }} />
 
       <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
-        <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+        <div style={{ display:'flex', alignItems:'center', gap:8, flexWrap:'wrap' }}>
           <div style={{ fontSize:18, fontWeight:600, color:lt.text.primary }}>All Evaluations</div>
           <div style={{ flex:1 }} />
-          <button onClick={handleExport} style={{ display:'flex', alignItems:'center', gap:6, padding:'6px 14px', borderRadius:6, border:`1.5px solid ${lt.stroke.primary}`, background:lt.bg.editor, color:lt.text.primary, fontSize:13, fontWeight:500, cursor:'pointer', fontFamily:font }}>
-            ↓ Export CSV
-          </button>
+          <button onClick={handleExport} style={{ padding:'6px 12px', borderRadius:6, border:`1.5px solid ${lt.stroke.primary}`, background:lt.bg.editor, color:lt.text.primary, fontSize:12, fontWeight:500, cursor:'pointer', fontFamily:font }}>↓ Export CSV</button>
+          <button onClick={handleBackup} style={{ padding:'6px 12px', borderRadius:6, border:`1.5px solid ${lt.accent.primary}`, background:lt.fill.secondary, color:lt.accent.primary, fontSize:12, fontWeight:600, cursor:'pointer', fontFamily:font }}>↓ Backup JSON</button>
+          <button onClick={() => { setRestorePanel(p => p ? '' : ' '); setCsvPanel(''); setRestoreMsg(null); }} style={{ padding:'6px 12px', borderRadius:6, border:`1.5px solid ${lt.stroke.primary}`, background:lt.bg.editor, color:lt.text.secondary, fontSize:12, fontWeight:500, cursor:'pointer', fontFamily:font }}>↑ Restore</button>
         </div>
+
+        {restoreMsg && (
+          <div style={{ background:restoreMsg.ok?'#F0FDF4':'#FEF2F2', border:`1px solid ${restoreMsg.ok?'#BBF7D0':'#FECACA'}`, borderRadius:6, padding:'10px 14px', display:'flex', alignItems:'center', justifyContent:'space-between' }}>
+            <span style={{ fontSize:13, fontWeight:600, color:restoreMsg.ok?cl.green:pl.diffStripRemoved }}>{restoreMsg.text}</span>
+            <button onClick={() => setRestoreMsg(null)} style={{ background:'none', border:'none', cursor:'pointer', color:lt.text.secondary, fontSize:14, padding:'0 4px', fontFamily:font }}>✕</button>
+          </div>
+        )}
+
+        {restorePanel !== '' && (
+          <div style={{ border:`1.5px solid ${lt.stroke.secondary}`, borderRadius:8, overflow:'hidden' }}>
+            <div style={{ padding:'10px 14px', background:lt.fill.tertiary, borderBottom:`1px solid ${lt.stroke.secondary}`, display:'flex', alignItems:'center', gap:10 }}>
+              <span style={{ fontSize:13, fontWeight:600, color:lt.text.primary, flex:1 }}>Paste a JSON backup to restore — new records are merged, duplicates skipped</span>
+              <button onClick={() => { setRestorePanel(''); setRestoreMsg(null); }} style={{ background:'none', border:'none', cursor:'pointer', color:lt.text.secondary, fontSize:14, padding:'2px 6px', fontFamily:font }}>✕</button>
+            </div>
+            <div style={{ padding:'10px 14px', display:'flex', flexDirection:'column', gap:8, background:lt.bg.editor }}>
+              <textarea value={restorePanel.trim() === '' ? '' : restorePanel} onChange={e => setRestorePanel(e.target.value)} rows={6} placeholder='Paste backup JSON here...' style={{ ...inputBase, resize:'vertical', lineHeight:'18px', fontFamily:'monospace', fontSize:11 }} />
+              <div style={{ display:'flex', gap:8 }}>
+                <button onClick={handleRestore} disabled={!restorePanel.trim()} style={{ padding:'6px 16px', borderRadius:6, border:'none', fontSize:13, fontWeight:600, fontFamily:font, cursor:restorePanel.trim()?'pointer':'not-allowed', background:restorePanel.trim()?lt.accent.primary:lt.fill.secondary, color:restorePanel.trim()?lt.text.onAccent:lt.text.tertiary }}>Restore records</button>
+                <button onClick={() => { setRestorePanel(''); setRestoreMsg(null); }} style={{ padding:'6px 14px', borderRadius:6, border:`1px solid ${lt.stroke.primary}`, fontSize:13, background:lt.bg.editor, color:lt.text.secondary, cursor:'pointer', fontFamily:font }}>Cancel</button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {csvPanel && (
           <div style={{ border:`1.5px solid ${lt.accent.primary}`, borderRadius:8, overflow:'hidden' }}>
@@ -572,11 +675,11 @@ function ResultsTab({ calls, setCalls }: { calls: CallEntry[]; setCalls: (v: Cal
                 {isPendingDelete && (
                   <div style={{ padding:'12px 14px', background:pl.diffRemovedLine, borderTop:`1px solid ${pl.diffStripRemoved}` }}>
                     <div style={{ display:'flex', alignItems:'center', gap:10, flexWrap:'wrap' }}>
-                      <span style={{ fontSize:12, fontWeight:600, color:lt.text.primary }}>Type <span style={{ fontFamily:'monospace', background:lt.fill.secondary, padding:'1px 5px', borderRadius:3 }}>Delete</span> to permanently remove:</span>
-                      <input type="text" value={deleteState?.pw??''} onChange={e => setDeleteState({ id:c.id, pw:e.target.value, error:false })} placeholder="Delete" style={{ padding:'4px 8px', fontSize:12, borderRadius:4, width:100, border:`1.5px solid ${deleteState?.error?pl.diffStripRemoved:lt.stroke.primary}`, background:lt.bg.editor, color:lt.text.primary, fontFamily:'monospace', outline:'none' }} />
+                      <span style={{ fontSize:12, fontWeight:600, color:lt.text.primary }}>Enter deletion password to permanently remove:</span>
+                      <input type="text" value={deleteState?.pw??''} onChange={e => setDeleteState({ id:c.id, pw:e.target.value, error:false })} placeholder="••••••" style={{ padding:'4px 8px', fontSize:12, borderRadius:4, width:100, border:`1.5px solid ${deleteState?.error?pl.diffStripRemoved:lt.stroke.primary}`, background:lt.bg.editor, color:lt.text.primary, fontFamily:'monospace', outline:'none' }} />
                       <button onClick={confirmDelete} disabled={deleteState?.pw!=='Delete'} style={{ padding:'4px 12px', borderRadius:4, border:'none', fontSize:12, fontWeight:600, fontFamily:font, cursor:deleteState?.pw==='Delete'?'pointer':'not-allowed', background:deleteState?.pw==='Delete'?pl.diffStripRemoved:lt.fill.secondary, color:deleteState?.pw==='Delete'?lt.text.onAccent:lt.text.tertiary }}>Confirm delete</button>
                       <button onClick={() => setDeleteState(null)} style={{ padding:'4px 12px', borderRadius:4, border:`1px solid ${lt.stroke.primary}`, fontSize:12, background:lt.bg.editor, color:lt.text.secondary, cursor:'pointer', fontFamily:font }}>Cancel</button>
-                      {deleteState?.error && <span style={{ fontSize:12, color:pl.diffStripRemoved, fontWeight:600 }}>Wrong — type exactly <span style={{ fontFamily:'monospace' }}>Delete</span></span>}
+                      {deleteState?.error && <span style={{ fontSize:12, color:pl.diffStripRemoved, fontWeight:600 }}>Incorrect password — try again</span>}
                     </div>
                   </div>
                 )}
@@ -631,7 +734,7 @@ function ResultsTab({ calls, setCalls }: { calls: CallEntry[]; setCalls: (v: Cal
 // ── Root ──────────────────────────────────────────────────────────────────────
 export default function App() {
   const [tab,   setTab]   = useLocalState<'log'|'results'>('tab', 'log');
-  const [calls, setCalls] = useLocalState<CallEntry[]>('calls', SEED);
+  const [calls, setCalls] = useCallsState();
   return (
     <div style={{ background:lt.bg.editor, minHeight:'100vh', fontFamily:font, color:lt.text.primary }}>
       <div style={{ background:lt.accent.primary, padding:'18px 24px 16px' }}>
